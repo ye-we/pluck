@@ -8,6 +8,9 @@ GOTOOLCHAIN=$(sed -n 's/^toolchain //p' go.mod)
 export GOTOOLCHAIN
 go vet ./...
 go test ./...
+# go build leaves a program in place if the build ID inside it matches, even
+# when the rest of the file was changed, so CI couldn't spot a tampered one.
+rm -f dist/pluck-*
 for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
 	os=${target%/*}
 	arch=${target#*/}
