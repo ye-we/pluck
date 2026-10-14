@@ -29,13 +29,17 @@ Then start a new session. There's nothing else to install: pluck ships ready-to-
 
 Ordinary code blocks are never copied automatically.
 
+### Hidden characters
+
+Some characters don't show on screen but change what a paste does: terminal control codes (one can switch off your shell's paste protection so a pasted line runs), text-direction overrides that reorder what you see, and invisible tag characters that other AI models read as text. A web page or file Claude reads could try to slip them into a reply. pluck removes them from everything it copies, and the copy message says how many it removed.
+
 ### Character limits
 
 When the destination has a limit, Claude tags the block with it, like ` ```pluck 280 `. If the text is over, pluck sends it back to Claude to shorten before copying anything. If it's still over after one retry, pluck copies it anyway and tells you by how much.
 
 ## Copy by hand
 
-Type these at the Claude prompt. The `!` runs them as shell commands, and the copy itself takes a fraction of a second. You can also run `pluck` in any other terminal, or bind it to a key with the macOS Shortcuts app (a Run Shell Script action), to copy without touching the Claude session.
+Type these at the Claude prompt. The `!` runs them as shell commands, and the copy itself takes a fraction of a second. You can also run `pluck` in any other terminal, or bind it to a key with the macOS Shortcuts app (a Run Shell Script action), to copy without touching the Claude session. Outside a session, pluck uses the newest session for the folder you're in, else the newest of all, and then says which project it came from.
 
 | Command | What it does |
 | --- | --- |
@@ -44,7 +48,7 @@ Type these at the Claude prompt. The `!` runs them as shell commands, and the co
 | `!pluck -l` | List the blocks in the last reply |
 | `!pluck --history` | List recent copies |
 | `!pluck --history 3` | Copy item 3 from that list again |
-| `!pluck --undo` | Put back what was on your clipboard before the last copy |
+| `!pluck --undo` | Put back what was on your clipboard before the last copy (within 5 minutes) |
 
 To use `pluck` outside Claude Code too, clone this repo and link `bin/pluck` onto your PATH:
 
@@ -63,7 +67,7 @@ Only macOS has been tested so far. Reports from other setups are welcome.
 
 ## Privacy
 
-pluck keeps your last 50 copies in `~/.claude/pluck/history.jsonl`, readable only by you. For `--undo` it also keeps what your clipboard held before the latest copy, and only that one, so things like copied passwords don't pile up. Delete the file any time.
+pluck keeps your last 50 copies in `~/.claude/pluck/history.jsonl`, readable only by you. For `--undo` it also keeps what your clipboard held before the latest copy, in `~/.claude/pluck/undo.txt`. That may be a password, so pluck keeps only that one and deletes it after 5 minutes, the next time it runs (it runs after every Claude reply). Delete either file any time.
 
 Nothing is sent anywhere.
 
@@ -82,6 +86,8 @@ claude plugin validate .
 ```
 
 Commit the rebuilt `dist/` along with your change, and bump the version in `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`.
+
+The build is reproducible: the Go version is pinned in `go.mod`, so anyone can run `./scripts/build.sh` and get the same bytes as the programs in `dist/`. CI does exactly that on every push and fails if they differ, and it tests the real Linux clipboard tools under a virtual display. `PLUCK_CLIPBOARD_TEST=1 go test ./...` runs that test on your machine, replacing what's on your clipboard.
 
 ## License
 

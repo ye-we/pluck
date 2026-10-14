@@ -62,12 +62,17 @@ func backends() []backend {
 	return usable
 }
 
+// run runs a clipboard tool, giving it input or returning its output. Copy
+// tools like xclip leave a process running to serve the clipboard, so their
+// output isn't read: waiting for that process to close it would never end.
 func run(args []string, input []byte) ([]byte, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.WaitDelay = time.Second
 	if input != nil {
 		cmd.Stdin = bytes.NewReader(input)
+		return nil, cmd.Run() == nil
 	}
 	out, err := cmd.Output()
 	return out, err == nil

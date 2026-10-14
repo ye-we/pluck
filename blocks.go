@@ -10,9 +10,10 @@ import (
 
 // A block is a fenced code block or a > quote in a reply.
 type block struct {
-	Kind  string // the fence's language tag ("pluck", "bash", ...), "code" or "quote"
-	Text  string
-	Limit int // character limit from a "pluck 280" tag, 0 if none
+	Kind   string // the fence's language tag ("pluck", "bash", ...), "code" or "quote"
+	Text   string
+	Limit  int // character limit from a "pluck 280" tag, 0 if none
+	Hidden int // hidden characters removed from Text (see clean)
 }
 
 var (
@@ -50,7 +51,7 @@ func blocks(markdown string) []block {
 				}
 				body = append(body, line)
 			}
-			b.Text = strings.Trim(strings.Join(body, "\n"), "\n")
+			b.Text, b.Hidden = clean(strings.Trim(strings.Join(body, "\n"), "\n"))
 			found = append(found, b)
 			i++
 			continue
@@ -60,7 +61,9 @@ func blocks(markdown string) []block {
 			for ; i < len(lines) && strings.HasPrefix(strings.TrimLeft(lines[i], " \t"), ">"); i++ {
 				body = append(body, quoteMarker.ReplaceAllString(lines[i], ""))
 			}
-			found = append(found, block{Kind: "quote", Text: unmark(strings.TrimSpace(strings.Join(body, "\n")))})
+			b := block{Kind: "quote"}
+			b.Text, b.Hidden = clean(unmark(strings.TrimSpace(strings.Join(body, "\n"))))
+			found = append(found, b)
 			continue
 		}
 		i++
@@ -156,6 +159,43 @@ func plain(markdown string) string {
 	return strings.TrimSpace(text)
 }
 
+// hidden reports whether r is a character you can't see that changes what a
+// paste does: terminal control codes (a pasted escape code can end a shell's
+// paste protection, a carriage return can run a line), text direction
+// overrides that reorder what's shown, and tag characters, invisible text
+// that AI models read. Zero-width joiners stay: emoji made of several emoji,
+// like a family, need them.
+func hidden(r rune) bool {
+	switch {
+	case r == '\n' || r == '\t':
+		return false
+	case r < 0x20 || (r >= 0x7f && r < 0xa0):
+		return true
+	case r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+		return true
+	case r == 0x200b || r == 0xfeff:
+		return true
+	case r >= 0xe0000 && r <= 0xe007f:
+		return true
+	}
+	return false
+}
+
+// clean removes hidden characters from text that's about to be pasted
+// somewhere, and says how many it removed.
+func clean(text string) (string, int) {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	removed := 0
+	text = strings.Map(func(r rune) rune {
+		if hidden(r) {
+			removed++
+			return -1
+		}
+		return r
+	}, text)
+	return text, removed
+}
+
 // chars counts characters the way people and form fields do, not bytes.
 func chars(text string) int {
 	return utf8.RuneCountInString(text)
@@ -163,6 +203,7 @@ func chars(text string) int {
 
 func preview(text string) string {
 	const width = 60
+	text, _ = clean(text)
 	flat := []rune(strings.Join(strings.Fields(text), " "))
 	if len(flat) <= width {
 		return string(flat)

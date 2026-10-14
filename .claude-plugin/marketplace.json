@@ -10,7 +10,7 @@
       "name": "pluck",
       "source": "./",
       "description": "Copies paste-ready text from Claude's replies to your clipboard, clean: no markdown, no terminal wrap breaks.",
-      "version": "0.3.0"
+      "version": "0.4.0"
     }
   ]
 }

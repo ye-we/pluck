@@ -62,15 +62,22 @@ func stopHook(r io.Reader, w io.Writer) {
 	var p stopPayload
 	json.NewDecoder(r).Decode(&p)
 
-	// Prefer the message Claude Code hands the hook. Fall back to the
-	// transcript if it's missing or cut short.
+	// Prefer the message Claude Code hands the hook. It's only the last part
+	// of the reply, so the transcript is checked too, in case Claude wrote the
+	// block before a tool call, or the message is missing or cut short.
+	complete := p.LastAssistantMessage != "" && !truncated.MatchString(p.LastAssistantMessage)
 	var b *block
-	if !truncated.MatchString(p.LastAssistantMessage) {
+	if complete {
 		b = firstPluck(p.LastAssistantMessage)
 	}
 	if b == nil && p.TranscriptPath != "" {
 		// The final message can land in the transcript a moment after Stop.
-		for try := 0; try < 6; try++ {
+		// That's only worth waiting for when the hook didn't get it.
+		tries := 1
+		if !complete {
+			tries = 6
+		}
+		for try := 0; try < tries; try++ {
 			segments, current, err := lastReply(p.TranscriptPath)
 			if err != nil {
 				return
@@ -81,7 +88,9 @@ func stopHook(r io.Reader, w io.Writer) {
 				}
 				break
 			}
-			time.Sleep(150 * time.Millisecond)
+			if try < tries-1 {
+				time.Sleep(150 * time.Millisecond)
+			}
 		}
 	}
 	if b == nil {
@@ -99,12 +108,24 @@ func stopHook(r io.Reader, w io.Writer) {
 		return
 	}
 	if put(b.Text) {
-		note := fmt.Sprintf("Copied to clipboard (%d chars)", n)
+		var notes []string
 		if over {
-			note = fmt.Sprintf("Copied to clipboard (%d chars, still %d over the %d limit)", n, n-b.Limit, b.Limit)
+			notes = append(notes, fmt.Sprintf("still %d over the %d limit", n-b.Limit, b.Limit))
 		}
-		say(w, map[string]string{"systemMessage": note})
+		say(w, map[string]string{"systemMessage": "Copied to clipboard" + details(n, notes, b.Hidden)})
 	}
+}
+
+// details adds a copy's size, notes and any hidden characters removed, like
+// " (212 chars, removed 2 hidden characters)".
+func details(n int, notes []string, removed int) string {
+	all := append([]string{fmt.Sprintf("%d chars", n)}, notes...)
+	if removed == 1 {
+		all = append(all, "removed 1 hidden character")
+	} else if removed > 1 {
+		all = append(all, fmt.Sprintf("removed %d hidden characters", removed))
+	}
+	return " (" + strings.Join(all, ", ") + ")"
 }
 
 func ago(seconds float64) string {
@@ -141,7 +162,7 @@ func history(args []string, w io.Writer) error {
 		if err != nil {
 			return err
 		}
-		text := newestFirst[n-1].Text
+		text, _ := clean(newestFirst[n-1].Text)
 		if !put(text) {
 			return errors.New("couldn't reach a clipboard")
 		}
@@ -159,13 +180,12 @@ func history(args []string, w io.Writer) error {
 }
 
 func undo(w io.Writer) error {
-	entries := loadHistory()
-	if len(entries) == 0 || entries[len(entries)-1].Replaced == nil {
-		return errors.New("nothing to undo")
+	data, err := os.ReadFile(undoPath())
+	if err != nil {
+		return fmt.Errorf("nothing to undo (pluck forgets what it replaced after %d minutes)", int(undoFor.Minutes()))
 	}
-	text := *entries[len(entries)-1].Replaced
-	entries[len(entries)-1].Replaced = nil
-	saveHistory(entries)
+	os.Remove(undoPath())
+	text := string(data)
 	if !copyText(text) {
 		return errors.New("couldn't reach a clipboard")
 	}
@@ -178,6 +198,9 @@ func manual(args []string, w io.Writer) error {
 	path := findTranscript()
 	if path == "" {
 		return errors.New("no Claude Code transcript found")
+	}
+	if project := elsewhere(path); project != "" {
+		fmt.Fprintf(w, "From the newest Claude session, in %s\n", project)
 	}
 	segments, _, err := lastReply(path)
 	if err != nil {
@@ -204,14 +227,14 @@ func manual(args []string, w io.Writer) error {
 		if len(args) > 0 {
 			return errors.New("the last reply has no code block or quote; run pluck to copy all of it")
 		}
-		text := plain(reply)
+		text, removed := clean(plain(reply))
 		if text == "" {
 			return errors.New("the last reply has no text")
 		}
 		if !put(text) {
 			return errors.New("couldn't reach a clipboard")
 		}
-		fmt.Fprintf(w, "Copied the whole reply (%d chars): %s\n", chars(text), preview(text))
+		fmt.Fprintf(w, "Copied the whole reply%s: %s\n", details(chars(text), nil, removed), preview(text))
 		return nil
 	}
 
@@ -233,16 +256,17 @@ func manual(args []string, w io.Writer) error {
 	if !put(b.Text) {
 		return errors.New("couldn't reach a clipboard")
 	}
-	n, warning := chars(b.Text), ""
+	n, notes := chars(b.Text), []string(nil)
 	if b.Limit > 0 && n > b.Limit {
-		warning = fmt.Sprintf(" (%d over the %d limit)", n-b.Limit, b.Limit)
+		notes = append(notes, fmt.Sprintf("%d over the %d limit", n-b.Limit, b.Limit))
 	}
-	fmt.Fprintf(w, "Copied %d chars%s: %s\n", n, warning, preview(b.Text))
+	fmt.Fprintf(w, "Copied%s: %s\n", details(n, notes, b.Hidden), preview(b.Text))
 	return nil
 }
 
 // dispatch runs one command. Options work with one dash or two.
 func dispatch(args []string, in io.Reader, out io.Writer) error {
+	forgetOldUndo()
 	option := ""
 	if len(args) > 0 && strings.HasPrefix(args[0], "-") {
 		option = strings.TrimLeft(args[0], "-")
