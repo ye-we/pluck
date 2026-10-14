@@ -114,20 +114,66 @@ func (e entry) texts() []string {
 	return texts
 }
 
+// elsewhere names the project a transcript belongs to when it isn't this
+// session's or this folder's, so copying from another project is noticed.
+func elsewhere(path string) string {
+	if session := os.Getenv("CLAUDE_CODE_SESSION_ID"); session != "" && filepath.Base(path) == session+".jsonl" {
+		return ""
+	}
+	project := filepath.Base(filepath.Dir(path))
+	if cwd, err := os.Getwd(); err == nil && project == nonAlnum.ReplaceAllString(cwd, "-") {
+		return ""
+	}
+	return strings.TrimPrefix(strings.TrimPrefix(project, nonAlnum.ReplaceAllString(home(), "-")), "-")
+}
+
 // lastReply returns the text segments of the newest assistant reply that has
-// any text, and whether that reply answers the newest prompt.
+// any text, and whether that reply answers the newest prompt. It reads only
+// the end of the transcript when that holds the whole reply: this runs after
+// every reply, and a long session's transcript runs to tens of megabytes.
 func lastReply(path string) ([]string, bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, false, err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	size := info.Size()
 
+	for window := int64(1 << 20); ; window *= 8 {
+		start := max(0, size-window)
+		replies, err := splitReplies(io.NewSectionReader(f, start, size-start), start > 0)
+		if err != nil {
+			return nil, false, err
+		}
+		for i := len(replies) - 1; i >= 0; i-- {
+			if len(replies[i]) == 0 {
+				continue
+			}
+			// The first reply may have begun before the window.
+			if i > 0 || start == 0 {
+				return replies[i], i == len(replies)-1, nil
+			}
+			break
+		}
+		if start == 0 {
+			return nil, false, nil
+		}
+	}
+}
+
+// splitReplies groups a transcript's assistant text by the prompt it answers.
+// The first group is whatever came before the first prompt. When cut is set,
+// the reader starts mid-transcript and its first line, maybe partial, is skipped.
+func splitReplies(r io.Reader, cut bool) ([][]string, error) {
 	replies := [][]string{nil}
-	reader := bufio.NewReaderSize(f, 1<<20)
-	for {
+	reader := bufio.NewReaderSize(r, 1<<20)
+	for first := true; ; first = false {
 		line, err := reader.ReadBytes('\n')
-		if len(bytes.TrimSpace(line)) > 0 {
+		if len(bytes.TrimSpace(line)) > 0 && !(first && cut) {
 			var e entry
 			if json.Unmarshal(line, &e) == nil {
 				switch {
@@ -140,16 +186,10 @@ func lastReply(path string) ([]string, bool, error) {
 			}
 		}
 		if errors.Is(err, io.EOF) {
-			break
+			return replies, nil
 		}
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 	}
-	for i := len(replies) - 1; i >= 0; i-- {
-		if len(replies[i]) > 0 {
-			return replies[i], i == len(replies)-1, nil
-		}
-	}
-	return nil, false, nil
 }

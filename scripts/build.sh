@@ -1,7 +1,11 @@
 #!/bin/sh
 # Builds the pluck programs the plugin ships, one per platform, into dist/.
+# The same source always builds the same bytes: Go is pinned in go.mod, and
+# nothing about this machine or the git state goes into the programs.
 set -e
 cd "$(dirname "$0")/.."
+GOTOOLCHAIN=$(sed -n 's/^toolchain //p' go.mod)
+export GOTOOLCHAIN
 go vet ./...
 go test ./...
 for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
@@ -9,6 +13,6 @@ for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64 wi
 	arch=${target#*/}
 	out="dist/pluck-$os-$arch"
 	[ "$os" = windows ] && out="$out.exe"
-	CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags "-s -w" -o "$out" .
+	CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -buildvcs=false -ldflags "-s -w" -o "$out" .
 	echo "built $out"
 done

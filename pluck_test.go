@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 const fence = "```"
@@ -107,6 +109,15 @@ func TestPlainKeepsMathAndSnakeCase(t *testing.T) {
 	}
 }
 
+func TestHiddenCharactersAreRemoved(t *testing.T) {
+	coder := "\U0001F469\u200D\U0001F4BB" // woman technologist: two emoji joined by a zero-width joiner
+	text := "echo hi\x1b[201~\r\nls\rrm \u202Efdp.exe\u200b \U000E0049\U000E0047 " + coder + "\tok"
+	b := firstPluck(fence + "pluck\n" + text + "\n" + fence)
+	if want := "echo hi[201~\nlsrm fdp.exe  " + coder + "\tok"; b.Text != want || b.Hidden != 6 {
+		t.Fatalf("got %q, %d removed", b.Text, b.Hidden)
+	}
+}
+
 func TestCharsCountsCharactersNotBytes(t *testing.T) {
 	if n := chars("Ethiopia’s “test” 📲"); n != 19 {
 		t.Fatalf("got %d", n)
@@ -166,7 +177,62 @@ func TestHookFallsBackToTranscriptWhenMessageIsCut(t *testing.T) {
 	}
 }
 
+func TestHookSaysWhenItRemovedHiddenCharacters(t *testing.T) {
+	board := setup(t)
+	out := runHook(t, map[string]any{"last_assistant_message": fence + "pluck\nrm\u202E -rf\x1b\n" + fence})
+	if *board != "rm -rf" || out["systemMessage"] != "Copied to clipboard (6 chars, removed 2 hidden characters)" {
+		t.Fatalf("board %q, out %v", *board, out)
+	}
+}
+
+func TestHookFindsBlockWrittenBeforeToolCall(t *testing.T) {
+	board := setup(t)
+	path := writeTranscript(t, prompt("draft it and save it"),
+		reply(fence+"pluck\nthe draft\n"+fence), toolResult(), reply("Saved."))
+	runHook(t, map[string]any{"last_assistant_message": "Saved.", "transcript_path": path})
+	if *board != "the draft" {
+		t.Fatalf("board %q", *board)
+	}
+}
+
+func TestHookDoesNotWaitWhenItHasTheWholeMessage(t *testing.T) {
+	board := setup(t)
+	// The answer to "two" isn't in the transcript yet.
+	path := writeTranscript(t, prompt("one"), reply(fence+"pluck\nold\n"+fence), prompt("two"))
+	start := time.Now()
+	runHook(t, map[string]any{"last_assistant_message": "A plain answer.", "transcript_path": path})
+	if took := time.Since(start); took > 100*time.Millisecond || *board != "what you had" {
+		t.Fatalf("took %v, board %q", took, *board)
+	}
+}
+
 // --- transcript ---
+
+func bigToolResult() map[string]any {
+	return map[string]any{"type": "user", "message": map[string]any{"role": "user",
+		"content": []map[string]any{{"type": "tool_result", "content": strings.Repeat("x", 3<<20)}}}}
+}
+
+func TestLastReplyReadsOnlyAsFarBackAsNeeded(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		rows    []map[string]any
+		want    string
+		current bool
+	}{
+		{"reply after a long session", []map[string]any{prompt("old"), reply("old answer"), bigToolResult(),
+			prompt("new"), reply("new answer")}, "new answer", true},
+		{"reply longer than the tail", []map[string]any{prompt("go"), reply("start"), bigToolResult(),
+			reply("end")}, "start|end", true},
+		{"newest prompt not answered yet", []map[string]any{prompt("first"), reply("answer"), bigToolResult(),
+			reply("more"), prompt("second")}, "answer|more", false},
+	} {
+		segments, current, err := lastReply(writeTranscript(t, c.rows...))
+		if err != nil || strings.Join(segments, "|") != c.want || current != c.current {
+			t.Errorf("%s: segments %q current %v err %v", c.name, segments, current, err)
+		}
+	}
+}
 
 func TestBashInputAndToolResultsAreNotPrompts(t *testing.T) {
 	path := writeTranscript(t,
@@ -227,13 +293,27 @@ func TestUndoRestoresWhatWasReplaced(t *testing.T) {
 	}
 }
 
-func TestOnlyNewestEntryKeepsReplacedText(t *testing.T) {
+func TestHistoryDoesNotKeepWhatWasReplaced(t *testing.T) {
 	setup(t)
 	put("one")
 	put("two")
-	entries := loadHistory()
-	if entries[0].Replaced != nil || entries[1].Replaced == nil || *entries[1].Replaced != "one" {
-		t.Fatalf("entries %+v", entries)
+	data, _ := os.ReadFile(historyPath)
+	if bytes.Contains(data, []byte("what you had")) {
+		t.Fatalf("history holds the old clipboard: %s", data)
+	}
+}
+
+func TestUndoIsForgottenAfterFiveMinutes(t *testing.T) {
+	setup(t)
+	put("pluck")
+	old := time.Now().Add(-undoFor - time.Minute)
+	os.Chtimes(undoPath(), old, old)
+	err := dispatch([]string{"--undo"}, nil, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "nothing to undo") {
+		t.Fatalf("err %v", err)
+	}
+	if _, err := os.Stat(undoPath()); !os.IsNotExist(err) {
+		t.Fatalf("undo file still there: %v", err)
 	}
 }
 
@@ -305,11 +385,57 @@ func TestUnknownOptionIsNamed(t *testing.T) {
 	}
 }
 
-func TestHistoryFileIsPrivate(t *testing.T) {
+func TestHistoryFilesArePrivate(t *testing.T) {
 	setup(t)
 	put("x")
-	info, err := os.Stat(historyPath)
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("mode %v err %v", info.Mode().Perm(), err)
+	for _, path := range []string{historyPath, undoPath()} {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s: mode %v err %v", path, info.Mode().Perm(), err)
+		}
+	}
+}
+
+// --- clipboard ---
+
+func TestCopyDoesNotWaitForToolsLeftRunning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs sh")
+	}
+	start := time.Now()
+	// Like xclip: take the text, then leave a process running in the background.
+	if _, ok := run([]string{"sh", "-c", "cat >/dev/null; sleep 10 & exit 0"}, []byte("x")); !ok {
+		t.Fatal("copy failed")
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("copy took %v", took)
+	}
+}
+
+// TestRealClipboard copies through this machine's clipboard tools. That
+// replaces what's on your clipboard, so it only runs when asked to. CI runs it
+// on Linux under a virtual display.
+func TestRealClipboard(t *testing.T) {
+	if os.Getenv("PLUCK_CLIPBOARD_TEST") == "" {
+		t.Skip("set PLUCK_CLIPBOARD_TEST=1 to use the real clipboard")
+	}
+	t.Setenv("HOME", t.TempDir()) // xsel logs to a file there
+	tools := backends()
+	if len(tools) == 0 {
+		t.Fatal("no clipboard tool found")
+	}
+	for _, b := range tools {
+		t.Run(b.copy[0], func(t *testing.T) {
+			start := time.Now()
+			if _, ok := run(b.copy, []byte("from pluck")); !ok {
+				t.Fatal("copy failed")
+			}
+			if took := time.Since(start); took > 2*time.Second {
+				t.Fatalf("copy took %v", took)
+			}
+			if out, ok := run(b.paste, nil); !ok || string(out) != "from pluck" {
+				t.Fatalf("pasted %q", out)
+			}
+		})
 	}
 }
