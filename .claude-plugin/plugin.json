@@ -1,0 +1,18 @@
+{
+  "name": "pluck",
+  "version": "0.3.0",
+  "description": "Copies paste-ready text from Claude's replies to your clipboard, clean: no markdown, no terminal wrap breaks.",
+  "author": {
+    "name": "yewe",
+    "url": "https://github.com/ye-we"
+  },
+  "license": "MIT",
+  "keywords": [
+    "clipboard",
+    "copy",
+    "paste",
+    "terminal"
+  ],
+  "homepage": "https://github.com/ye-we/pluck",
+  "repository": "https://github.com/ye-we/pluck"
+}

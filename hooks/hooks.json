@@ -1,0 +1,26 @@
+{
+  "description": "Tells Claude to put paste-ready text in pluck blocks, and copies the first pluck block of each reply to the clipboard.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/pluck\" --session-start"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/pluck\" --hook",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

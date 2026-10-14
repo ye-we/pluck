@@ -1,0 +1,35 @@
+#!/bin/sh
+# Runs the pluck program built for this machine (see dist/).
+
+# Follow symlinks so this works when linked onto your PATH.
+self=$0
+while [ -L "$self" ]; do
+	link=$(readlink "$self")
+	case $link in
+	/*) self=$link ;;
+	*) self=$(dirname "$self")/$link ;;
+	esac
+done
+root=$(cd "$(dirname "$self")/.." && pwd)
+
+case $(uname -s) in
+Darwin) os=darwin ;;
+Linux) os=linux ;;
+MINGW* | MSYS* | CYGWIN*) os=windows ;;
+*) os= ;;
+esac
+case $(uname -m) in
+arm64 | aarch64) arch=arm64 ;;
+x86_64 | amd64) arch=amd64 ;;
+*) arch= ;;
+esac
+
+exe="$root/dist/pluck-$os-$arch"
+[ "$os" = windows ] && exe="$exe.exe"
+if [ -z "$os" ] || [ -z "$arch" ] || [ ! -x "$exe" ]; then
+	# Stay quiet in hooks so an unsupported machine doesn't error every reply.
+	case $1 in --hook | --session-start) exit 0 ;; esac
+	echo "pluck: no build for $(uname -s) $(uname -m)" >&2
+	exit 1
+fi
+exec "$exe" "$@"
